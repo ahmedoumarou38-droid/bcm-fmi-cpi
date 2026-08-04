@@ -1,0 +1,5 @@
+scraping/venv/
+scraping/output/
+scraping/*.html
+__pycache__/
+*.pyc

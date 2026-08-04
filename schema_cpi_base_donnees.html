@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Schéma CPI - Base FMI</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; color: #242424; background: #f7f7f4; }
+    main { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
+    h1 { margin: 0 0 20px; font-size: 26px; font-weight: 700; }
+    #erd { overflow-x: auto; padding: 20px; background: #ffffff; border: 1px solid #d9d8d2; border-radius: 8px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+    #erd svg.erDiagram .divider path { stroke-opacity: 0.5; }
+    #erd svg.erDiagram .row-rect-odd path,
+    #erd svg.erDiagram .row-rect-odd rect,
+    #erd svg.erDiagram .row-rect-even path,
+    #erd svg.erDiagram .row-rect-even rect { stroke: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Schéma de la base de données FMI - CPI</h1>
+    <h2 class="sr-only">Schéma de la base de données FMI, schéma CPI : trois tables METADATA, DONNEES et LOGS, où DONNEES référence LOGS via run_id</h2>
+    <div id="erd"></div>
+  </main>
+
+  <script type="module">
+    import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    await document.fonts.ready;
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'base',
+      fontFamily: 'Arial, sans-serif',
+      themeVariables: {
+        darkMode: dark,
+        fontSize: '13px',
+        fontFamily: 'Arial, sans-serif',
+        lineColor: dark ? '#9c9a92' : '#73726c',
+        textColor: dark ? '#c2c0b6' : '#3d3d3a'
+      }
+    });
+
+    const src = `erDiagram
+      LOGS ||--o{ DONNEES : "produit"
+      METADATA {
+        string dataset_id PK
+        string dataset_name
+        string agency
+        string version
+        string description_courte
+        string description_complete
+        string frequency
+        string publisher
+        string department
+        string contact_point
+        string topic
+        string keywords
+        string language
+        date publication_date
+        date update_date
+        string short_source_citation
+        string full_source_citation
+      }
+      LOGS {
+        string run_id PK
+        string pipeline
+        datetime date_debut
+        datetime date_fin
+        string statut
+        int nb_elements_collectes
+        int nb_elements_persistes
+        string message_erreur
+      }
+      DONNEES {
+        bigint id PK
+        string run_id FK
+        string field_id
+        string field_name
+        string field_description
+        string country
+        string coicop_1999
+        string type_of_transformation
+        string frequency
+        string time_period
+        float obs_value
+      }`;
+
+    const { svg } = await mermaid.render('erd-svg', src);
+    document.getElementById('erd').innerHTML = svg;
+  </script>
+</body>
+</html>

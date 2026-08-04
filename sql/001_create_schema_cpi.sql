@@ -3,42 +3,45 @@
 -- SGBD cible : PostgreSQL
 -- =====================================================================
 
--- 1. Création de la base de données (à exécuter une seule fois, hors transaction)
--- Décommente si la base n'existe pas encore :
+-- 1. Création de la base de données (à exécuter une seule fois,
+--    hors transaction). Décommenter si la base n'existe pas encore :
 -- CREATE DATABASE "FMI";
 
--- 2. Connecte-toi à la base FMI avant de continuer (\c FMI dans psql,
---    ou sélectionne la connexion "FMI" dans SQLTools)
+-- 2. Se connecter à la base FMI avant de continuer :
+--    \c FMI
 
--- 3. Création du schéma dédié au dataset CPI
+-- 3. Création du schéma dédié au dataset CPI.
 CREATE SCHEMA IF NOT EXISTS cpi;
 
 SET search_path TO cpi;
 
 -- ---------------------------------------------------------------------
--- Table METADATA : informations descriptives sur le dataset (1 ligne
--- par dataset/version)
+-- Table METADATA : informations descriptives sur le dataset.
+-- Une ligne par dataset/version.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cpi.metadata (
-    dataset_id          VARCHAR(50)  NOT NULL,
-    agency              VARCHAR(100),
-    version             VARCHAR(20),
-    description_courte  TEXT,
-    frequency           VARCHAR(20),
-    publisher           VARCHAR(150),
-    department          VARCHAR(150),
-    contact_point       VARCHAR(150),
-    topic               VARCHAR(150),
-    keywords            TEXT,
-    language            VARCHAR(10),
-    publication_date    DATE,
-    update_date         DATE,
-    source_citation     TEXT,
+    dataset_id              VARCHAR(50)  NOT NULL,
+    dataset_name            VARCHAR(150) NOT NULL,
+    agency                  VARCHAR(100) NOT NULL,
+    version                 VARCHAR(20),
+    description_courte      TEXT,
+    description_complete    TEXT,
+    frequency               VARCHAR(20),
+    publisher               VARCHAR(150),
+    department              VARCHAR(150),
+    contact_point           VARCHAR(150),
+    topic                   VARCHAR(150),
+    keywords                TEXT,
+    language                VARCHAR(10),
+    publication_date        DATE,
+    update_date             DATE,
+    short_source_citation   TEXT,
+    full_source_citation    TEXT,
     CONSTRAINT pk_metadata PRIMARY KEY (dataset_id)
 );
 
 -- ---------------------------------------------------------------------
--- Table LOGS : historique des exécutions du pipeline de collecte
+-- Table LOGS : historique des exécutions du pipeline de collecte.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cpi.logs (
     run_id                  VARCHAR(50)  NOT NULL,
@@ -50,13 +53,20 @@ CREATE TABLE IF NOT EXISTS cpi.logs (
     nb_elements_persistes   INTEGER,
     message_erreur          TEXT,
     CONSTRAINT pk_logs PRIMARY KEY (run_id),
-    CONSTRAINT chk_statut CHECK (statut IN ('SUCCESS','FAILED','RUNNING','PARTIAL'))
+    CONSTRAINT chk_logs_statut
+        CHECK (statut IN ('SUCCESS', 'FAILED', 'RUNNING', 'PARTIAL')),
+    CONSTRAINT chk_logs_volumetrie_collectee
+        CHECK (nb_elements_collectes IS NULL OR nb_elements_collectes >= 0),
+    CONSTRAINT chk_logs_volumetrie_persistee
+        CHECK (nb_elements_persistes IS NULL OR nb_elements_persistes >= 0),
+    CONSTRAINT chk_logs_dates
+        CHECK (date_fin IS NULL OR date_fin >= date_debut)
 );
 
 -- ---------------------------------------------------------------------
 -- Table DONNEES : dictionnaire des champs + observations, tracées par
 -- run_id (lien vers logs). Une exécution produit plusieurs lignes,
--- donc run_id est ici une clé étrangère, pas une clé primaire.
+-- donc run_id est une clé étrangère, pas une clé primaire.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cpi.donnees (
     id                      BIGSERIAL    NOT NULL,
@@ -76,14 +86,14 @@ CREATE TABLE IF NOT EXISTS cpi.donnees (
         ON DELETE RESTRICT
 );
 
--- Index pour l'audit / le rollback par run, et les requêtes fréquentes
+-- Index pour l'audit / le rollback par run, et les requêtes fréquentes.
 CREATE INDEX IF NOT EXISTS idx_donnees_run_id ON cpi.donnees (run_id);
 CREATE INDEX IF NOT EXISTS idx_donnees_country_period ON cpi.donnees (country, time_period);
 
 -- ---------------------------------------------------------------------
--- Vérification rapide
--- ---------------------------------------------------------------------
+-- Vérification rapide dans psql :
 -- \dt cpi.*
 -- \d cpi.metadata
 -- \d cpi.logs
 -- \d cpi.donnees
+-- ---------------------------------------------------------------------
