@@ -1,179 +1,148 @@
-# Documentation - Schéma CPI (base de données FMI)
+# Schéma cible IMF / CPI — Documentation
 
-## Contexte
+**Base de données :** `imf`
+**Schéma :** `cpi`
+**Script de création :** `sql/create_schema_imf_cpi_001.sql` (idempotent, rejouable)
 
-Ce document décrit la structure de la base de données créée pour recevoir les données du dataset **CPI** (Consumer Price Index) du FMI : métadonnées, dictionnaire des champs, observations et journalisation des exécutions du pipeline de collecte.
+## Comment lancer le script
 
-- **SGBD** : PostgreSQL
-- **Base de données** : `FMI`
-- **Schéma** : `cpi`
-- **Script de création** : `sql/001_create_schema_cpi.sql`
-- **Script de collecte metadata** : `scraping/collect_cpi_metadata.py`
-- **Diagramme HTML** : `schema_cpi_base_donnees.html`
+**Via pgAdmin (recommandé) :**
+1. Créer la base `imf` (clic-droit sur "Databases" > Create > Database > nom `imf`)
+2. Se connecter à `imf`, ouvrir le Query Tool
+3. Coller le contenu de `sql/create_schema_imf_cpi_001.sql` et exécuter (F5)
 
-L'architecture en schémas (un schéma par dataset FMI) permet d'ajouter facilement d'autres jeux de données (WEO, GDD, PCPS, etc.) dans la même base `FMI` sans refonte, en créant simplement un nouveau schéma.
-
----
-
-## Schéma relationnel
-
-```text
-LOGS                         DONNEES
-----                         -------
-run_id (PK) <---------------- run_id (FK)
-pipeline                     id (PK)
-date_debut                   field_id
-date_fin                     field_name
-statut                       field_description
-nb_elements_collectes         country
-nb_elements_persistes        coicop_1999
-message_erreur               type_of_transformation
-                              frequency
-                              time_period
-                              obs_value
-
-METADATA
---------
-dataset_id (PK)
-dataset_name
-agency
-version
-description_courte
-description_complete
-frequency
-publisher
-department
-contact_point
-topic
-keywords
-language
-publication_date
-update_date
-short_source_citation
-full_source_citation
-```
-
-**Relation clé** : `donnees.run_id` référence `logs.run_id` (contrainte `fk_donnees_run`). Chaque exécution du pipeline (une ligne dans `logs`) peut produire plusieurs lignes d'observations dans `donnees`, ce qui permet de tracer précisément quelle exécution a produit quelles données (audit, rollback ciblé sur un `run_id`).
-
-> Note : `donnees` porte sa propre clé primaire technique (`id`, auto-incrémentée) et non `run_id`, car une exécution génère naturellement plusieurs observations (plusieurs pays, périodes, champs).
-
----
-
-## Table `metadata`
-
-Informations descriptives sur le dataset (une ligne par dataset/version).
-
-| Colonne | Type | Contrainte | Description |
-|---|---|---|---|
-| dataset_id | VARCHAR(50) | **PK**, NOT NULL | Identifiant du dataset |
-| dataset_name | VARCHAR(150) | NOT NULL | Nom du dataset |
-| agency | VARCHAR(100) | NOT NULL | Agence source (ex: FMI) |
-| version | VARCHAR(20) | | Version du dataset |
-| description_courte | TEXT | | Description courte |
-| description_complete | TEXT | | Description complète |
-| frequency | VARCHAR(20) | | Fréquence des données (ex: monthly) |
-| publisher | VARCHAR(150) | | Éditeur du dataset |
-| department | VARCHAR(150) | | Département responsable |
-| contact_point | VARCHAR(150) | | Point de contact |
-| topic | VARCHAR(150) | | Thématique |
-| keywords | TEXT | | Mots-clés |
-| language | VARCHAR(10) | | Langue |
-| publication_date | DATE | | Date de publication |
-| update_date | DATE | | Date de dernière mise à jour |
-| short_source_citation | TEXT | | Citation courte de la source |
-| full_source_citation | TEXT | | Citation complète de la source |
-
----
-
-## Table `logs`
-
-Historique des exécutions du pipeline de collecte.
-
-| Colonne | Type | Contrainte | Description |
-|---|---|---|---|
-| run_id | VARCHAR(50) | **PK**, NOT NULL | Identifiant unique de l'exécution |
-| pipeline | VARCHAR(100) | NOT NULL | Nom du pipeline exécuté |
-| date_debut | TIMESTAMP | NOT NULL | Horodatage de début |
-| date_fin | TIMESTAMP | CHECK | Horodatage de fin, supérieur ou égal à `date_debut` si renseigné |
-| statut | VARCHAR(20) | NOT NULL, CHECK | Statut : `SUCCESS`, `FAILED`, `RUNNING`, `PARTIAL` |
-| nb_elements_collectes | INTEGER | CHECK | Nombre d'éléments collectés, positif ou nul |
-| nb_elements_persistes | INTEGER | CHECK | Nombre d'éléments réellement enregistrés, positif ou nul |
-| message_erreur | TEXT | | Message d'erreur éventuel |
-
----
-
-## Table `donnees`
-
-Dictionnaire des champs et observations, tracées par exécution.
-
-| Colonne | Type | Contrainte | Description |
-|---|---|---|---|
-| id | BIGSERIAL | **PK**, NOT NULL | Identifiant technique auto-incrémenté |
-| run_id | VARCHAR(50) | **FK** -> `logs.run_id`, NOT NULL | Exécution ayant produit la ligne |
-| field_id | VARCHAR(50) | | Identifiant du champ |
-| field_name | VARCHAR(150) | | Nom du champ |
-| field_description | TEXT | | Description du champ |
-| country | VARCHAR(10) | | Code pays |
-| coicop_1999 | VARCHAR(20) | | Code de classification COICOP 1999 |
-| type_of_transformation | VARCHAR(50) | | Type de transformation appliquée |
-| frequency | VARCHAR(20) | | Fréquence de l'observation |
-| time_period | VARCHAR(20) | | Période temporelle de l'observation |
-| obs_value | DOUBLE PRECISION | | Valeur observée |
-
-**Index** :
-
-- `idx_donnees_run_id` sur `run_id` : accélère les requêtes d'audit/rollback par exécution.
-- `idx_donnees_country_period` sur `(country, time_period)` : accélère les requêtes d'analyse par pays/période.
-
----
-
-## Contraintes d'intégrité résumées
-
-- Toutes les clés primaires (`dataset_id`, `run_id`, `id`) sont `NOT NULL` par définition.
-- `metadata.dataset_name` et `metadata.agency` sont obligatoires.
-- `logs.statut` est contraint aux valeurs `SUCCESS`, `FAILED`, `RUNNING`, `PARTIAL` (contrainte `chk_logs_statut`).
-- `logs.nb_elements_collectes` et `logs.nb_elements_persistes` doivent être positifs ou nuls lorsqu'ils sont renseignés.
-- `logs.date_fin` doit être supérieure ou égale à `logs.date_debut` lorsqu'elle est renseignée.
-- `donnees.run_id` doit obligatoirement correspondre à un `run_id` existant dans `logs` (contrainte `fk_donnees_run`, `ON DELETE RESTRICT` : un log ne peut pas être supprimé tant que des données lui sont rattachées).
-
----
-
-## Collecte Metadata CPI
-
-Le script `scraping/collect_cpi_metadata.py` exécute le rendu JavaScript du portail IMF Data avec Playwright, parse le DOM final avec BeautifulSoup, vérifie le nombre de champs metadata attendus, puis écrit les résultats dans `cpi.metadata` si une connexion PostgreSQL est fournie.
-
-Exécution sans écriture PostgreSQL, pour test et export SharePoint manuel :
-
+**Via psql (si disponible dans le PATH) :**
 ```bash
-scraping/venv/Scripts/python.exe scraping/collect_cpi_metadata.py --no-db
+psql -U postgres -h localhost -c "CREATE DATABASE imf;"
+psql -U postgres -h localhost -d imf -f sql/create_schema_imf_cpi_001.sql
 ```
 
-Exécution avec insertion dans PostgreSQL :
+## Table `cpi.metadata`
 
-```bash
-scraping/venv/Scripts/python.exe scraping/collect_cpi_metadata.py --dsn "dbname=FMI user=postgres password=postgres host=localhost port=5432"
+Informations descriptives du dataset CPI (une ligne par dataset).
+
+| Colonne | Type | Contraintes | Notes |
+|---|---|---|---|
+| id | BIGSERIAL | PK | Champ technique |
+| dataset_name | TEXT | NOT NULL | |
+| dataset_id | VARCHAR(50) | NOT NULL, UNIQUE | ex : "CPI" |
+| frequency | VARCHAR(200) | | ex : "Annual, Monthly, Quarterly" |
+| agency | VARCHAR(100) | | |
+| version | VARCHAR(50) | | |
+| dataset_description | TEXT | | |
+| geographical_coverage | TEXT | | |
+| full_description | TEXT | | |
+| publisher | VARCHAR(255) | | |
+| department | VARCHAR(255) | | |
+| contact_point | VARCHAR(255) | | |
+| topic_dataset | TEXT | | |
+| keywords_dataset | TEXT | | |
+| language | VARCHAR(100) | | |
+| publication_date | TIMESTAMP | | Format ISO `YYYY-MM-DDTHH:MM:SS` |
+| update_date | TIMESTAMP | | Format ISO `YYYY-MM-DDTHH:MM:SS` |
+| short_source_citation | TEXT | | |
+| full_source_citation | TEXT | | |
+| license | TEXT | | |
+| suggested_citation | TEXT | | |
+| created_at | TIMESTAMP | NOT NULL, défaut now() | Champ technique |
+| updated_at | TIMESTAMP | NOT NULL, défaut now() | Champ technique — égal à created_at |
+
+## Table `cpi.logs`
+
+Historique des exécutions des pipelines de collecte.
+
+| Colonne | Type | Contraintes | Notes |
+|---|---|---|---|
+| id | BIGSERIAL | PK | Champ technique — remplace l'ancien `run_id` texte |
+| pipeline | VARCHAR(100) | NOT NULL | |
+| start_date | TIMESTAMP | NOT NULL | Format ISO `YYYY-MM-DDTHH:MM:SS` |
+| end_date | TIMESTAMP | | Format ISO `YYYY-MM-DDTHH:MM:SS` |
+| status | VARCHAR(20) | NOT NULL, CHECK IN ('SUCCESS','FAILED') | Voir point ouvert ci-dessous (RUNNING) |
+| collected_elements_count | INTEGER | CHECK ≥ 0 | |
+| persisted_elements_count | INTEGER | CHECK ≥ 0 | |
+| error_message | TEXT | | |
+| created_at | TIMESTAMP | NOT NULL, défaut now() | Champ technique |
+| updated_at | TIMESTAMP | NOT NULL, défaut now() | Champ technique — égal à created_at |
+
+**Contrainte de cohérence des dates :** `end_date IS NULL OR end_date >= start_date`
+⚠️ Le feedback demande littéralement `CHECK (start_date > end_date)`, ce qui empêcherait toute exécution normale. Corrigé en sens inverse — **à confirmer**.
+
+## Table `cpi.data`
+
+Observations CPI détaillées, avec l'ensemble des dimensions et métadonnées associées du dataset (structure alignée sur l'export complet du Data Explorer du FMI). Pour chaque dimension SDMX, trois colonnes suivent la convention `<dimension>_id` (code), `<dimension>` (libellé), `<dimension>_description` (description longue) — ex : `country_id` / `country` / `country_description`.
+
+| Colonne | Type | Notes |
+|---|---|---|
+| id | BIGSERIAL | PK, champ technique |
+| logs_id | BIGINT | FK → `cpi.logs(id)` ON DELETE RESTRICT — ajouté après `id`, défini dans la section "Relations" du feedback (absent de la liste énumérée des colonnes) |
+| country_id / country / country_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| index_type_id / index_type / index_type_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| coicop_1999_id / coicop_1999 / coicop_1999_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| type_of_transformation_id / type_of_transformation / type_of_transformation_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| frequency_id / frequency / frequency_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| time_period | VARCHAR(20) | |
+| obs_value | DOUBLE PRECISION | |
+| scale_id / scale / scale_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| precision_id / precision / precision_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| decimals_displayed_id / decimals_displayed / decimals_displayed_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| reporting_period_type_id / reporting_period_type / reporting_period_type_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| transformation_id / transformation / transformation_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| unit_id / unit / unit_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| derivation_type_id / derivation_type / derivation_type_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| overlap_id / overlap / overlap_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| reference_period | VARCHAR(50) | |
+| common_reference_period | VARCHAR(50) | |
+| status | VARCHAR(50) | Statut de l'observation (distinct de `logs.status`) |
+| ifs_flag | VARCHAR(20) | |
+| doi | VARCHAR(255) | |
+| full_description | TEXT | |
+| author | VARCHAR(255) | |
+| publisher_id / publisher / publisher_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| department_id / department / department_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| contact_point | VARCHAR(255) | |
+| topic_id / topic / topic_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| topic_dataset_id / topic_dataset / topic_dataset_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| keywords | TEXT | |
+| keywords_dataset | TEXT | |
+| language_id / language / language_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| publication_date | TIMESTAMP | Format ISO `YYYY-MM-DDTHH:MM:SS` |
+| update_date | TIMESTAMP | Format ISO `YYYY-MM-DDTHH:MM:SS` |
+| methodology_id / methodology / methodology_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| methodology_notes | TEXT | |
+| access_sharing_level_id / access_sharing_level / access_sharing_level_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| access_sharing_notes | TEXT | |
+| security_classification_id / security_classification / security_classification_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| source_id / source / source_description | VARCHAR(50) / VARCHAR(255) / TEXT | |
+| short_source_citation | TEXT | |
+| full_source_citation | TEXT | |
+| license | TEXT | |
+| suggested_citation | TEXT | |
+| key_indicator | VARCHAR(20) | |
+| series_name | VARCHAR(255) | |
+| created_at | TIMESTAMP | NOT NULL, défaut now() — champ technique |
+| updated_at | TIMESTAMP | NOT NULL, défaut now() — champ technique, égal à created_at |
+
+## Relations
+
+```
+cpi.logs (id) ──< cpi.data (logs_id)   [ON DELETE RESTRICT]
 ```
 
-Sorties locales créées par défaut dans `scraping/output/` :
+## Index
 
-- `cpi_metadata.json`
-- `cpi_metadata.xlsx`
+- `idx_data_logs_id` sur `cpi.data(logs_id)`
+- `idx_data_country_time_period` sur `cpi.data(country, time_period)`
 
-Le fichier Excel peut être déposé dans le fichier SharePoint existant. L'écriture directe SharePoint nécessite une connexion ou un connecteur SharePoint.
+## Choix de conception
 
----
+- **Formats de date** : tous les champs date/datetime sont en `TIMESTAMP`, format ISO 8601 (`YYYY-MM-DDTHH:MM:SS`).
+- **Longueur des champs texte** : descriptions et contenus longs en `TEXT` (illimité) ; codes courts en `VARCHAR(50)` ; libellés/noms en `VARCHAR(255)`.
+- **Clés primaires techniques** : `BIGSERIAL` sur les 3 tables.
+- **Convention triplet** : chaque dimension SDMX de `cpi.data` est représentée par 3 colonnes (code / libellé / description), reflétant fidèlement la structure du Data Explorer FMI.
+- **Idempotence** : `IF NOT EXISTS` partout, sauf `CREATE DATABASE` (limitation PostgreSQL, à exécuter séparément).
 
-## Rejeu du script SQL sur un autre environnement
+## Points à confirmer avec l'équipe
 
-```bash
-# 1. Créer la base (une seule fois)
-psql -U postgres -c 'CREATE DATABASE "FMI";'
-
-# 2. Exécuter le script de création du schéma
-psql -U postgres -d FMI -f sql/001_create_schema_cpi.sql
-
-# 3. Vérifier
-psql -U postgres -d FMI -c "SELECT table_name FROM information_schema.tables WHERE table_schema = 'cpi';"
-```
-
-Le script utilise `CREATE SCHEMA IF NOT EXISTS` et `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`. Il est donc rejouable sans erreur sur un environnement où le schéma existe déjà.
+1. Sens de la contrainte de cohérence des dates (`end_date >= start_date` vs `start_date > end_date` tel qu'écrit littéralement)
+2. Le statut `RUNNING` (utilisé actuellement par les scripts Python) n'est pas dans la liste autorisée (`SUCCESS`, `FAILED`) — implique une adaptation des scripts Python (suppression de l'état intermédiaire) si la contrainte reste stricte
+3. `cpi.data.logs_id` : colonne ajoutée d'après la section "Relations" du feedback, absente de la liste énumérée des colonnes elle-même — à confirmer que le positionnement (juste après `id`) convient
