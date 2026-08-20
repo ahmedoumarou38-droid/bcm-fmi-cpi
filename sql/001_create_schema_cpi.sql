@@ -2,6 +2,7 @@
 CREATE SCHEMA IF NOT EXISTS cpi;
 
 
+
 CREATE TABLE IF NOT EXISTS cpi.metadata (
     id                      BIGSERIAL PRIMARY KEY,
     dataset_name            TEXT NOT NULL,
@@ -30,12 +31,10 @@ CREATE TABLE IF NOT EXISTS cpi.metadata (
 
 COMMENT ON TABLE cpi.metadata IS 'Informations descriptives du dataset CPI (une ligne par dataset).';
 
--- -----------------------------------------------------------------------------
--- Table cpi.logs (créée avant cpi.data car référencée par sa FK)
--- -----------------------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS cpi.logs (
     id                          BIGSERIAL PRIMARY KEY,
-    pipeline                    VARCHAR(100) NOT NULL,
+    request_mode                VARCHAR(50) NOT NULL,   -- renommé depuis "pipeline" ; énumération (API, Web Scraping)
     start_date                  TIMESTAMP NOT NULL,
     end_date                    TIMESTAMP,
     status                      VARCHAR(20) NOT NULL,
@@ -45,6 +44,8 @@ CREATE TABLE IF NOT EXISTS cpi.logs (
     created_at                   TIMESTAMP NOT NULL DEFAULT now(),
     updated_at                   TIMESTAMP NOT NULL DEFAULT now(),
 
+    CONSTRAINT chk_logs_request_mode
+        CHECK (request_mode IN ('API', 'Web Scraping')),
     CONSTRAINT chk_logs_status
         CHECK (status IN ('SUCCESS', 'FAILED')),
     CONSTRAINT chk_logs_dates
@@ -52,7 +53,13 @@ CREATE TABLE IF NOT EXISTS cpi.logs (
     CONSTRAINT chk_logs_collected_nonneg
         CHECK (collected_elements_count IS NULL OR collected_elements_count >= 0),
     CONSTRAINT chk_logs_persisted_nonneg
-        CHECK (persisted_elements_count IS NULL OR persisted_elements_count >= 0)
+        CHECK (persisted_elements_count IS NULL OR persisted_elements_count >= 0),
+    CONSTRAINT chk_logs_collected_eq_persisted
+        CHECK (
+            collected_elements_count IS NULL
+            OR persisted_elements_count IS NULL
+            OR collected_elements_count = persisted_elements_count
+        )
 );
 
 COMMENT ON TABLE cpi.logs IS 'Historique des exécutions des pipelines de collecte CPI.';
