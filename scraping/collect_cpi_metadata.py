@@ -125,10 +125,7 @@ def extract_metadata_fields(html: str) -> dict:
             if node:
                 result[column] = parse_combined_label_value(str(node), label)
 
-    # 2) Frequency : n'est PAS dans le panneau Metadata (sidebar), mais dans une
-    # carte séparée toujours visible sur la page (structure DOM différente) :
-    # <div title="Frequency" class="...MetadataLabel...">Frequency:</div>
-    # <div class="...MetadataValue...."><p>Annual, Monthly, Quarterly</p></div>
+    
     freq_label = soup.find("div", title="Frequency")
     if freq_label:
         freq_container = freq_label.find_next_sibling()
@@ -136,10 +133,7 @@ def extract_metadata_fields(html: str) -> dict:
         if freq_value:
             result["frequency"] = freq_value
 
-    # 3) Tous les autres champs standards du panneau Metadata (sidebar).
-    # Comparaison avec .strip() : certains libellés du site ont un espace
-    # final parasite (ex: "Full Source Citation ", "Suggested Citation "),
-    # qui casse une comparaison d'égalité stricte.
+    
     for label, column in EXPECTED_FIELDS.items():
         if label in COMBINED_LABEL_VALUE_FIELDS or column == "frequency":
             continue

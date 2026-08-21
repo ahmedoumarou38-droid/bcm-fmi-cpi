@@ -1,31 +1,3 @@
-#!/usr/bin/env python3
-"""
-Collecte des observations CPI et du dictionnaire des champs via l'API SDMX
-publique du FMI, pour le DATASET COMPLET (tous pays, toutes catégories
-COICOP), conformément au périmètre défini par le ticket.
-
-⚠️ IMPORTANT — pourquoi ce script n'utilise PAS de wildcard :
-Contrairement à ce que suggère la documentation générale SDMX 3.0 (case
-vide = "toutes les valeurs"), l'instance Fusion Registry du FMI
-(api.imf.org) renvoie un dataset VIDE dès qu'une position de la clé est
-laissée vide ou remplacée par "*" — testé et confirmé le 18/08/2026 sur
-plusieurs combinaisons (wildcard simple, double, avec "*").
-
-La solution retenue : interroger d'abord l'endpoint /structure pour
-récupérer la liste RÉELLE des codes pays et catégories COICOP valides,
-puis construire la clé d'observations avec TOUS ces codes explicites,
-joints par '+' (union), ce que l'API accepte parfaitement.
-
-Canal : API SDMX 3.0 du FMI (api.imf.org/external/sdmx/3.0), accessible
-via une clé d'abonnement technique gratuite (portail api.imf.org).
-
-Usage :
-    # Dataset complet (comportement par défaut, correspond au ticket) :
-    python collect_cpi_data.py --api-key "..." --dsn "dbname=fmi ..."
-
-    # Restreint pour un test rapide (pas de découverte de structure) :
-    python collect_cpi_data.py --countries MRT --api-key "..." --no-db
-"""
 
 import argparse
 import csv
@@ -42,14 +14,11 @@ AGENCY = "IMF.STA"
 DATAFLOW = "CPI"
 DSD_ID = "DSD_CPI"
 DSD_VERSION = "5.0.0"
-VERSION = "~"  # dernière version disponible pour les données
+VERSION = "~"
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Dictionnaire statique COICOP 1999 (nomenclature officielle FMI/ONU),
-# utilisé pour enrichir field_name/field_description. Sert de repli si
-# la découverte dynamique ne trouve pas de nom pour un code rencontré.
 COICOP_1999_DICTIONARY = {
     "_T": ("All Items", "Indice général des prix à la consommation, tous postes confondus"),
     "01": ("Food and non-alcoholic beverages", "Produits alimentaires et boissons non alcoolisées"),
@@ -69,9 +38,6 @@ COICOP_1999_DICTIONARY = {
 
 
 def fetch_structure(api_key):
-    """Récupère la définition complète du DSD CPI (dimensions + codelists
-    référencées), pour en extraire dynamiquement les codes pays et
-    COICOP réellement valides."""
     url = f"{BASE_URL}/structure/datastructure/{AGENCY}/{DSD_ID}/{DSD_VERSION}"
     headers = {"Accept": "application/json"}
     if api_key:
@@ -82,8 +48,6 @@ def fetch_structure(api_key):
 
 
 def _find_codelist_ref_for_dimension(structure_json, dimension_id):
-    """Cherche, dans dataStructures[].dataStructureComponents.dimensionList,
-    la référence de codelist associée à une dimension (ex: 'COUNTRY')."""
     data = structure_json.get("data", {})
     for ds in data.get("dataStructures", []):
         dims = (
@@ -95,15 +59,11 @@ def _find_codelist_ref_for_dimension(structure_json, dimension_id):
             if dim.get("id") == dimension_id:
                 enum = dim.get("localRepresentation", {}).get("enumeration")
                 if enum:
-                    # Peut être une URN complète ou un id direct.
                     return enum.split("=")[-1].split(".")[-1].split("(")[0]
     return None
 
 
 def _extract_codes_from_codelist(structure_json, codelist_id=None, id_keyword=None):
-    """Extrait la liste des codes (id) d'un codelist, identifié soit par
-    son id exact, soit par un mot-clé présent dans son id (repli si la
-    résolution exacte via dimensionList a échoué)."""
     data = structure_json.get("data", {})
     for cl in data.get("codelists", []):
         cl_id = cl.get("id", "")
@@ -115,8 +75,6 @@ def _extract_codes_from_codelist(structure_json, codelist_id=None, id_keyword=No
 
 
 def discover_valid_codes(api_key):
-    """Découvre dynamiquement les codes pays et COICOP valides pour le
-    dataset CPI, en interrogeant l'endpoint /structure du FMI."""
     print("Découverte de la structure du dataset CPI (pays, catégories)...")
     structure_json = fetch_structure(api_key)
 
@@ -130,27 +88,21 @@ def discover_valid_codes(api_key):
     print(f"  {len(coicop)} code(s) COICOP trouvé(s).")
 
     if not countries:
-        print("⚠️  Aucun code pays trouvé automatiquement — vérifier la structure JSON.", file=sys.stderr)
+        print("⚠️  Aucun code pays trouvé automatiquement.", file=sys.stderr)
     if not coicop:
-        print("⚠️  Aucun code COICOP trouvé automatiquement — repli sur '_T' uniquement.", file=sys.stderr)
+        print("⚠️  Aucun code COICOP trouvé automatiquement — repli sur '_T'.", file=sys.stderr)
         coicop = ["_T"]
 
     return countries, coicop
 
 
 def build_key_segment(values):
-    """Construit un segment de clé SDMX : plusieurs codes joints par '+'
-    (union). Une liste vide produit une chaîne vide (à éviter : l'API ne
-    supporte pas les wildcards, voir note en tête de fichier)."""
     if not values:
         return ""
     return "+".join(values)
 
 
 def build_data_url(countries, coicop, transformation, frequency):
-    """Construit l'URL de requête selon l'ordre des dimensions du DSD CPI :
-    COUNTRY.INDEX_TYPE.COICOP_1999.TYPE_OF_TRANSFORMATION.FREQUENCY
-    INDEX_TYPE est toujours "CPI" pour ce dataflow."""
     key = ".".join([
         build_key_segment(countries),
         "CPI",
@@ -163,9 +115,6 @@ def build_data_url(countries, coicop, transformation, frequency):
 
 def fetch_observations_batch(api_key, countries, coicop, transformation, frequency,
                               start_period=None, end_period=None):
-    """Récupère les observations pour UN lot de pays (voir fetch_observations
-    pour la découpe en lots, nécessaire car l'API rejette les URL trop
-    longues - confirmé le 18/08/2026 avec ~1600 caractères)."""
     url = build_data_url(countries, coicop, transformation, frequency)
     headers = {"Accept": "text/csv"}
     if api_key:
@@ -189,11 +138,8 @@ def fetch_observations_batch(api_key, countries, coicop, transformation, frequen
 
 def fetch_observations(api_key, countries, coicop, transformation, frequency,
                         start_period=None, end_period=None, batch_size=15):
-    """Récupère les observations CPI au format CSV, en découpant la liste
-    de pays en lots (l'API rejette les URL trop longues au-delà d'environ
-    1600-2000 caractères, testé le 18/08/2026)."""
     if not countries:
-        countries = [None]  # un seul "lot" avec wildcard/absent
+        countries = [None]
 
     batches = [countries[i:i + batch_size] for i in range(0, len(countries), batch_size)]
     print(f"Récupération en {len(batches)} lot(s) de {batch_size} pays maximum...")
@@ -221,27 +167,30 @@ def build_field_dictionary(coicop_codes):
     dictionary = {}
     for code in coicop_codes:
         name, description = COICOP_1999_DICTIONARY.get(code, (code, None))
-        dictionary[code] = {
-            "field_id": code,
-            "field_name": name,
-            "field_description": description,
-        }
+        dictionary[code] = {"name": name, "description": description}
     return dictionary
 
 
-def build_rows(raw_rows, field_dict, run_id):
+DATA_COLUMNS = [
+    "logs_id",
+    "country_id", "country", "country_description",
+    "coicop_1999_id", "coicop_1999", "coicop_1999_description",
+    "type_of_transformation_id", "type_of_transformation",
+    "frequency_id", "frequency",
+    "time_period", "obs_value",
+]
+
+
+def build_rows(raw_rows, field_dict):
     rows = []
     for r in raw_rows:
-        country = r.get("COUNTRY") or r.get("COUNTRY.ID") or ""
+        country_id = r.get("COUNTRY") or r.get("COUNTRY.ID") or ""
         time_period = r.get("TIME_PERIOD") or ""
-        # Ignore les lignes "placeholder" vides renvoyées par l'API pour
-        # les codes sans aucune donnée CPI (agrégats régionaux, entités
-        # historiques comme DDR/SUN/YUG...).
-        if not country and not time_period:
+        if not country_id and not time_period:
             continue
 
-        coicop = r.get("COICOP_1999") or r.get("COICOP_1999.ID") or ""
-        field = field_dict.get(coicop, {"field_id": coicop, "field_name": coicop, "field_description": None})
+        coicop_id = r.get("COICOP_1999") or r.get("COICOP_1999.ID") or ""
+        field = field_dict.get(coicop_id, {"name": coicop_id, "description": None})
         obs_value_raw = r.get("OBS_VALUE") or r.get("Obs_value") or ""
         try:
             obs_value = float(obs_value_raw) if obs_value_raw not in ("", None) else None
@@ -249,14 +198,16 @@ def build_rows(raw_rows, field_dict, run_id):
             obs_value = None
 
         rows.append({
-            "run_id": run_id,
-            "field_id": field["field_id"],
-            "field_name": field["field_name"],
-            "field_description": field["field_description"],
-            "country": country,
-            "coicop_1999": coicop,
-            "type_of_transformation": r.get("TYPE_OF_TRANSFORMATION") or r.get("TYPE_OF_TRANSFORMATION.ID") or "",
-            "frequency": r.get("FREQUENCY") or r.get("FREQUENCY.ID") or "",
+            "country_id": country_id,
+            "country": None,
+            "country_description": None,
+            "coicop_1999_id": coicop_id,
+            "coicop_1999": field["name"],
+            "coicop_1999_description": field["description"],
+            "type_of_transformation_id": r.get("TYPE_OF_TRANSFORMATION") or r.get("TYPE_OF_TRANSFORMATION.ID") or "",
+            "type_of_transformation": None,
+            "frequency_id": r.get("FREQUENCY") or r.get("FREQUENCY.ID") or "",
+            "frequency": None,
             "time_period": time_period,
             "obs_value": obs_value,
         })
@@ -271,8 +222,8 @@ def save_json(rows, filename):
     return path
 
 
-EXCEL_MAX_ROWS = 1_048_576  # limite native du format .xlsx (avec marge de sécurité)
-EXCEL_SAFETY_MARGIN = 900_000  # on n'exporte plus localement au-delà (en-tête inclus)
+EXCEL_MAX_ROWS = 1_048_576
+EXCEL_SAFETY_MARGIN = 900_000
 
 
 def save_excel(rows, filename):
@@ -288,7 +239,7 @@ def save_excel(rows, filename):
     path = OUTPUT_DIR / filename
     wb = Workbook()
     ws = wb.active
-    ws.title = "donnees"
+    ws.title = "data"
     if rows:
         headers = list(rows[0].keys())
         ws.append(headers)
@@ -298,9 +249,53 @@ def save_excel(rows, filename):
     return path
 
 
-def save_postgres(rows, run_id, dsn, chunk_size=20000):
-    """Insère les lignes en base par paquets, pour éviter un timeout ou
-    une consommation mémoire excessive sur de très gros volumes."""
+def insert_log(dsn, request_mode, start_date, end_date, status,
+                collected_count, persisted_count, error_message=None):
+    import psycopg2
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO cpi.logs (
+                    request_mode, start_date, end_date, status,
+                    collected_elements_count, persisted_elements_count,
+                    error_message
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (request_mode, start_date, end_date, status,
+                 collected_count, persisted_count, error_message),
+            )
+            logs_id = cur.fetchone()[0]
+        conn.commit()
+        return logs_id
+    finally:
+        conn.close()
+
+
+def update_log(dsn, logs_id, status, persisted_count, error_message=None):
+    import psycopg2
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE cpi.logs
+                SET status = %s, collected_elements_count = %s,
+                    persisted_elements_count = %s, error_message = %s,
+                    end_date = %s
+                WHERE id = %s
+                """,
+                (status, persisted_count, persisted_count, error_message,
+                 datetime.now(timezone.utc), logs_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_postgres(rows, logs_id, dsn, chunk_size=20000):
     import psycopg2
     import psycopg2.extras
 
@@ -312,17 +307,12 @@ def save_postgres(rows, run_id, dsn, chunk_size=20000):
                 chunk = rows[i:i + chunk_size]
                 psycopg2.extras.execute_values(
                     cur,
-                    """
-                    INSERT INTO cpi.donnees (
-                        run_id, field_id, field_name, field_description,
-                        country, coicop_1999, type_of_transformation,
-                        frequency, time_period, obs_value
-                    ) VALUES %s
+                    f"""
+                    INSERT INTO cpi.data ({", ".join(DATA_COLUMNS)})
+                    VALUES %s
                     """,
                     [
-                        (r["run_id"], r["field_id"], r["field_name"], r["field_description"],
-                         r["country"], r["coicop_1999"], r["type_of_transformation"],
-                         r["frequency"], r["time_period"], r["obs_value"])
+                        tuple([logs_id] + [r[c] for c in DATA_COLUMNS if c != "logs_id"])
                         for r in chunk
                     ],
                 )
@@ -334,68 +324,23 @@ def save_postgres(rows, run_id, dsn, chunk_size=20000):
         conn.close()
 
 
-def create_log_run(dsn, run_id, pipeline, date_debut, statut, nb_collectes):
-    import psycopg2
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO cpi.logs (
-                    run_id, pipeline, date_debut, statut, nb_elements_collectes
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                (run_id, pipeline, date_debut, statut, nb_collectes),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def update_log_run(dsn, run_id, date_fin, statut, nb_persistes, message_erreur=None):
-    import psycopg2
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE cpi.logs
-                SET date_fin = %s, statut = %s,
-                    nb_elements_persistes = %s, message_erreur = %s
-                WHERE run_id = %s
-                """,
-                (date_fin, statut, nb_persistes, message_erreur, run_id),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def main():
-    import uuid
-
     parser = argparse.ArgumentParser(
         description="Collecte le dataset CPI complet (tous pays, toutes catégories) via l'API SDMX du FMI."
     )
-    parser.add_argument("--countries", nargs="*", default=None,
-                         help="Codes pays ISO3 à restreindre (ex: MRT). Par défaut : découverte automatique de TOUS les pays.")
-    parser.add_argument("--coicop", nargs="*", default=None,
-                         help="Codes COICOP à restreindre (ex: _T 01). Par défaut : découverte automatique de TOUTES les catégories.")
-    parser.add_argument("--transformation", nargs="*", default=["IX"],
-                         help="Types de transformation (défaut : IX, indice).")
-    parser.add_argument("--frequency", nargs="*", default=["M"],
-                         help="Fréquences (défaut : M, mensuelle).")
+    parser.add_argument("--countries", nargs="*", default=None)
+    parser.add_argument("--coicop", nargs="*", default=None)
+    parser.add_argument("--transformation", nargs="*", default=["IX"])
+    parser.add_argument("--frequency", nargs="*", default=["M"])
     parser.add_argument("--start-period", default=None)
     parser.add_argument("--end-period", default=None)
-    parser.add_argument("--batch-size", type=int, default=15,
-                         help="Nombre de pays par requête (défaut : 15, pour éviter les URL trop longues rejetées par l'API).")
+    parser.add_argument("--batch-size", type=int, default=15)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--no-db", action="store_true")
     args = parser.parse_args()
 
-    run_id = str(uuid.uuid4())
-    date_debut = datetime.now(timezone.utc)
+    start_date = datetime.now(timezone.utc)
 
     countries = args.countries
     coicop = args.coicop
@@ -421,15 +366,13 @@ def main():
     except requests.HTTPError as e:
         print(f"Erreur HTTP : {e}", file=sys.stderr)
         if not args.no_db and args.dsn:
-            create_log_run(args.dsn, run_id, "collect_cpi_data", date_debut, "FAILED", 0)
-            update_log_run(args.dsn, run_id, datetime.now(timezone.utc), "FAILED", 0, str(e))
+            insert_log(args.dsn, "API", start_date, datetime.now(timezone.utc), "FAILED", 0, 0, str(e))
         sys.exit(1)
 
     print(f"{len(raw_rows)} ligne(s) brute(s) récupérée(s) au total.")
 
     field_dict = build_field_dictionary(coicop)
-
-    rows = build_rows(raw_rows, field_dict, run_id)
+    rows = build_rows(raw_rows, field_dict)
 
     json_path = save_json(rows, "cpi_donnees.json")
     print(f"JSON : {json_path}")
@@ -437,28 +380,30 @@ def main():
     if excel_path:
         print(f"Excel : {excel_path}")
 
-    statut = "SUCCESS"
-    nb_persistes = 0
-    message_erreur = None
+    if args.no_db:
+        print(f"Résumé : {len(rows)} observation(s) traitée(s) | statut=SUCCESS (--no-db, rien en base)")
+        return
 
-    if not args.no_db:
-        if not args.dsn:
-            print("Erreur : --dsn requis (ou utiliser --no-db)", file=sys.stderr)
-            sys.exit(1)
+    if not args.dsn:
+        print("Erreur : --dsn requis (ou utiliser --no-db)", file=sys.stderr)
+        sys.exit(1)
 
-        create_log_run(args.dsn, run_id, "collect_cpi_data", date_debut, "RUNNING", len(rows))
+    end_date = datetime.now(timezone.utc)
 
-        try:
-            nb_persistes = save_postgres(rows, run_id, args.dsn)
-            print(f"✅ {nb_persistes} ligne(s) insérée(s) dans cpi.donnees.")
-        except Exception as e:
-            statut = "FAILED"
-            message_erreur = str(e)
-            print(f"Erreur PostgreSQL : {e}", file=sys.stderr)
+    logs_id = insert_log(args.dsn, "API", start_date, end_date, "SUCCESS", len(rows), len(rows))
 
-        update_log_run(args.dsn, run_id, datetime.now(timezone.utc), statut, nb_persistes, message_erreur)
+    try:
+        nb_persistes = save_postgres(rows, logs_id, args.dsn)
+        print(f"✅ {nb_persistes} ligne(s) insérée(s) dans cpi.data.")
+        statut = "SUCCESS"
+    except Exception as e:
+        statut = "FAILED"
+        print(f"Erreur PostgreSQL : {e}", file=sys.stderr)
+        update_log(args.dsn, logs_id, "FAILED", 0, str(e))
+        print(f"Résumé : logs_id={logs_id} | {len(rows)} observation(s) traitée(s) | statut=FAILED")
+        sys.exit(1)
 
-    print(f"Résumé : run_id={run_id} | {len(rows)} observation(s) traitée(s) | statut={statut}")
+    print(f"Résumé : logs_id={logs_id} | {len(rows)} observation(s) traitée(s) | statut={statut}")
 
 
 if __name__ == "__main__":
