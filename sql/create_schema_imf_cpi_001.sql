@@ -2,8 +2,6 @@
 CREATE SCHEMA IF NOT EXISTS cpi;
 
 
-
-CREATE TABLE IF NOT EXISTS cpi.metadata (
     id                      BIGSERIAL PRIMARY KEY,
     dataset_name            TEXT NOT NULL,
     dataset_id              VARCHAR(50) NOT NULL UNIQUE,
@@ -36,10 +34,10 @@ CREATE TABLE IF NOT EXISTS cpi.logs (
     id                          BIGSERIAL PRIMARY KEY,
     request_mode                VARCHAR(50) NOT NULL,   -- renommé depuis "pipeline" ; énumération (API, Web Scraping)
     start_date                  TIMESTAMP NOT NULL,
-    end_date                    TIMESTAMP,
+    end_date                    TIMESTAMP NOT NULL,
     status                      VARCHAR(20) NOT NULL,
-    collected_elements_count    INTEGER,
-    persisted_elements_count    INTEGER,
+    collected_elements_count    INTEGER NOT NULL,
+    persisted_elements_count    INTEGER NOT NULL,
     error_message                TEXT,
     created_at                   TIMESTAMP NOT NULL DEFAULT now(),
     updated_at                   TIMESTAMP NOT NULL DEFAULT now(),
@@ -49,17 +47,13 @@ CREATE TABLE IF NOT EXISTS cpi.logs (
     CONSTRAINT chk_logs_status
         CHECK (status IN ('SUCCESS', 'FAILED')),
     CONSTRAINT chk_logs_dates
-        CHECK (end_date IS NULL OR end_date >= start_date),  -- voir note en tête de fichier
+        CHECK (end_date > start_date),  -- strict : un traitement prend forcément un minimum de temps mesurable
     CONSTRAINT chk_logs_collected_nonneg
-        CHECK (collected_elements_count IS NULL OR collected_elements_count >= 0),
+        CHECK (collected_elements_count >= 0),
     CONSTRAINT chk_logs_persisted_nonneg
-        CHECK (persisted_elements_count IS NULL OR persisted_elements_count >= 0),
+        CHECK (persisted_elements_count >= 0),
     CONSTRAINT chk_logs_collected_eq_persisted
-        CHECK (
-            collected_elements_count IS NULL
-            OR persisted_elements_count IS NULL
-            OR collected_elements_count = persisted_elements_count
-        )
+        CHECK (collected_elements_count = persisted_elements_count)
 );
 
 COMMENT ON TABLE cpi.logs IS 'Historique des exécutions des pipelines de collecte CPI.';

@@ -13,15 +13,15 @@ DATASET_URL = "https://data.imf.org/en/datasets/IMF.STA:CPI"
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-
 EXPECTED_FIELDS = {
     "Dataset name": "dataset_name",
     "ID": "dataset_id",
+    "Frequency": "frequency",
     "Agency": "agency",
     "Version": "version",
     "Dataset Description": "dataset_description",
+    "Geographical Coverage": "geographical_coverage",
     "Full Description": "full_description",
-    "Frequency": "frequency",
     "Publisher": "publisher",
     "Department": "department",
     "Contact Point": "contact_point",
@@ -32,20 +32,15 @@ EXPECTED_FIELDS = {
     "Update Date": "update_date",
     "Short Source Citation": "short_source_citation",
     "Full Source Citation": "full_source_citation",
-    "Geographical Coverage": "geographical_coverage",
     "License": "license",
     "Suggested Citation": "suggested_citation",
 }
 
 DATE_FIELDS = {"publication_date", "update_date"}
-
-
 COMBINED_LABEL_VALUE_FIELDS = {"Dataset name", "ID", "Agency", "Version"}
 
 
 def parse_site_date(raw: str):
-    """Convertit une date du site (ex: 'Aug 05, 2026 - 6:46 AM') en
-    datetime Python. Retourne None si le format ne correspond pas."""
     if not raw:
         return None
     try:
@@ -55,8 +50,6 @@ def parse_site_date(raw: str):
 
 
 def fetch_metadata_html(headed: bool, dump_html: bool) -> str:
-    """Ouvre le dataset CPI dans un navigateur headless, clique sur le
-    lien "Metadata", et retourne le HTML du panneau une fois chargé."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not headed)
         page = browser.new_page()
@@ -66,7 +59,6 @@ def fetch_metadata_html(headed: bool, dump_html: bool) -> str:
 
         page.click("text=Metadata")
 
-        
         try:
             page.wait_for_selector("text=Dataset name", timeout=30000)
         except Exception:
@@ -85,9 +77,6 @@ def fetch_metadata_html(headed: bool, dump_html: bool) -> str:
 
 
 def extract_value_container(label_element):
-    """Trouve le conteneur de valeur associé à un libellé, en suivant le
-    DOM (sibling suivant, ou parent puis sibling suivant pour les
-    libellés imbriqués dans un h4)."""
     container = label_element.find_next_sibling()
     if container is None and label_element.parent is not None:
         container = label_element.parent.find_next_sibling()
@@ -95,8 +84,6 @@ def extract_value_container(label_element):
 
 
 def extract_leaf_paragraphs(container) -> str:
-    """Récupère tout le texte des balises <p> feuilles d'un conteneur,
-    jointes par ', ' (gère les champs multi-valeurs comme Keywords)."""
     if container is None:
         return ""
     paragraphs = container.find_all("p")
@@ -105,7 +92,6 @@ def extract_leaf_paragraphs(container) -> str:
 
 
 def parse_combined_label_value(text: str, label: str) -> str:
-    """Extrait la valeur d'un nœud texte combiné 'Label: Value'."""
     prefix = f"{label}:"
     if text.strip().startswith(prefix):
         return text.strip()[len(prefix):].strip()
@@ -113,19 +99,15 @@ def parse_combined_label_value(text: str, label: str) -> str:
 
 
 def extract_metadata_fields(html: str) -> dict:
-    """Parse le HTML et extrait les champs attendus. Retourne un dict
-    {colonne_db: valeur}."""
     soup = BeautifulSoup(html, "html.parser")
     result = {}
 
-    # 1) Champs combinés "Label: Value" sur un seul nœud (Dataset name, ID, Agency, Version)
     for label, column in EXPECTED_FIELDS.items():
         if label in COMBINED_LABEL_VALUE_FIELDS:
             node = soup.find(string=lambda s: s and s.strip().startswith(f"{label}:"))
             if node:
                 result[column] = parse_combined_label_value(str(node), label)
 
-    
     freq_label = soup.find("div", title="Frequency")
     if freq_label:
         freq_container = freq_label.find_next_sibling()
@@ -133,7 +115,6 @@ def extract_metadata_fields(html: str) -> dict:
         if freq_value:
             result["frequency"] = freq_value
 
-    
     for label, column in EXPECTED_FIELDS.items():
         if label in COMBINED_LABEL_VALUE_FIELDS or column == "frequency":
             continue
@@ -150,8 +131,6 @@ def extract_metadata_fields(html: str) -> dict:
 
 
 def check_structure_drift(found_fields: dict):
-    """Compare le nombre de champs attendus au nombre trouvés, et alerte
-    explicitement en cas d'écart (dérive de structure du site)."""
     expected_count = len(EXPECTED_FIELDS)
     found_count = len(found_fields)
 
@@ -188,10 +167,7 @@ def save_excel(data: dict, filename: str):
 
 
 def save_postgres(data: dict, dsn: str):
-    """Upsert dans cpi.metadata (ON CONFLICT sur dataset_id, toujours
-    UNIQUE dans le nouveau schéma). created_at et updated_at sont
-    explicitement fixés à la même valeur à chaque exécution (insertion
-    OU mise à jour), conformément au feedback."""
+    """Upsert dans cpi.metadata (ON CONFLICT sur dataset_id)."""
     import psycopg2
 
     now = datetime.now(timezone.utc)
@@ -226,6 +202,35 @@ def save_postgres(data: dict, dsn: str):
         conn.close()
 
 
+def insert_log(dsn, request_mode, start_date, end_date, status,
+                collected_count, persisted_count, error_message=None):
+    """Insère UN enregistrement final dans cpi.logs (pas d'état
+    intermédiaire), pour tracer l'exécution du scraping — cohérent avec
+    la structure validée en BCMDG-235 (request_mode, status en
+    énumération, comptages égaux)."""
+    import psycopg2
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO cpi.logs (
+                    request_mode, start_date, end_date, status,
+                    collected_elements_count, persisted_elements_count,
+                    error_message
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (request_mode, start_date, end_date, status,
+                 collected_count, persisted_count, error_message),
+            )
+            new_log_id = cur.fetchone()[0]
+        conn.commit()
+        return new_log_id
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Collecte la section Metadata du dataset CPI (IMF Data Portal)."
@@ -235,6 +240,8 @@ def main():
     parser.add_argument("--headed", action="store_true", help="Navigateur visible (debug).")
     parser.add_argument("--dump-html", action="store_true", help="Sauvegarder le HTML brut.")
     args = parser.parse_args()
+
+    start_date = datetime.now(timezone.utc)
 
     print("Ouverture du dataset CPI et récupération du panneau Metadata...")
     html = fetch_metadata_html(args.headed, args.dump_html)
@@ -251,14 +258,30 @@ def main():
     excel_path = save_excel(fields, "cpi_metadata.xlsx")
     print(f"Excel : {excel_path}")
 
-    if not args.no_db:
-        if not args.dsn:
-            print("Erreur : --dsn requis (ou utiliser --no-db)", file=sys.stderr)
-            sys.exit(1)
+    if args.no_db:
+        print(f"Résumé : {len(fields)}/{len(EXPECTED_FIELDS)} champ(s) collecté(s) | status=SUCCESS (--no-db, rien en base)")
+        return
+
+    if not args.dsn:
+        print("Erreur : --dsn requis (ou utiliser --no-db)", file=sys.stderr)
+        sys.exit(1)
+
+    end_date = datetime.now(timezone.utc)
+    nb_champs = len(fields)
+
+    try:
         save_postgres(fields, args.dsn)
         print("✅ Écrit dans cpi.metadata (upsert sur dataset_id).")
+        status = "SUCCESS"
+        new_log_id = insert_log(args.dsn, "Web Scraping", start_date, end_date, status, nb_champs, nb_champs)
+    except Exception as e:
+        status = "FAILED"
+        print(f"Erreur PostgreSQL : {e}", file=sys.stderr)
+        new_log_id = insert_log(args.dsn, "Web Scraping", start_date, datetime.now(timezone.utc), status, 0, 0, str(e))
+        print(f"Résumé : id={new_log_id} (cpi.logs) | {nb_champs}/{len(EXPECTED_FIELDS)} champ(s) métier collecté(s) | status=FAILED")
+        sys.exit(1)
 
-    print(f"Résumé : {len(fields)}/{len(EXPECTED_FIELDS)} champ(s) collecté(s).")
+    print(f"Résumé : id={new_log_id} (cpi.logs) | {nb_champs}/{len(EXPECTED_FIELDS)} champ(s) métier collecté(s) | status={status}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 scraping/venv/
 scraping/output/
+api/output/
+webscraping/venv/
+webscraping/output/
 scraping/*.html
 __pycache__/
 *.pyc
