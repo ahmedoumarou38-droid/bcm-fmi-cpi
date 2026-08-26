@@ -1,5 +1,13 @@
 
 import argparse
+import sys as _sys_early
+
+try:
+    _sys_early.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys_early.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import csv
 import io
 import sys
@@ -381,7 +389,7 @@ def main():
         print(f"Excel : {excel_path}")
 
     if args.no_db:
-        print(f"Résumé : {len(rows)} observation(s) traitée(s) | statut=SUCCESS (--no-db, rien en base)")
+        print(f"Résumé : {len(rows)} observation(s) traitée(s) | status=SUCCESS (--no-db, rien en base)")
         return
 
     if not args.dsn:
@@ -395,15 +403,15 @@ def main():
     try:
         nb_persistes = save_postgres(rows, logs_id, args.dsn)
         print(f"✅ {nb_persistes} ligne(s) insérée(s) dans cpi.data.")
-        statut = "SUCCESS"
+        status = "SUCCESS"
     except Exception as e:
-        statut = "FAILED"
+        status = "FAILED"
         print(f"Erreur PostgreSQL : {e}", file=sys.stderr)
         update_log(args.dsn, logs_id, "FAILED", 0, str(e))
-        print(f"Résumé : logs_id={logs_id} | {len(rows)} observation(s) traitée(s) | statut=FAILED")
+        print(f"Résumé : id={logs_id} (cpi.logs) | {len(rows)} observation(s) traitée(s) | status=FAILED")
         sys.exit(1)
 
-    print(f"Résumé : logs_id={logs_id} | {len(rows)} observation(s) traitée(s) | statut={statut}")
+    print(f"Résumé : id={logs_id} (cpi.logs) | {len(rows)} observation(s) traitée(s) | status={status}")
 
 
 if __name__ == "__main__":

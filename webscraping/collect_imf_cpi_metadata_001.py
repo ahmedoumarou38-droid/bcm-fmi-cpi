@@ -1,5 +1,13 @@
 
 import argparse
+import sys as _sys_early
+
+try:
+    _sys_early.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys_early.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import json
 import sys
 from datetime import datetime, timezone
@@ -83,19 +91,29 @@ def extract_value_container(label_element):
     return container
 
 
+def _normalize_whitespace(text: str) -> str:
+    """Réduit toute suite d'espaces/retours à la ligne consécutifs à un
+    seul espace. Corrige les doubles/triples espaces provenant du HTML
+    brut du site (espaces internes non normalisés entre nœuds texte) —
+    confirmé sur full_description et suggested_citation (feedback du
+    25/08/2026)."""
+    import re
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def extract_leaf_paragraphs(container) -> str:
     if container is None:
         return ""
     paragraphs = container.find_all("p")
-    values = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
+    values = [_normalize_whitespace(p.get_text(strip=True)) for p in paragraphs if p.get_text(strip=True)]
     return ", ".join(values)
 
 
 def parse_combined_label_value(text: str, label: str) -> str:
     prefix = f"{label}:"
     if text.strip().startswith(prefix):
-        return text.strip()[len(prefix):].strip()
-    return text.strip()
+        return _normalize_whitespace(text.strip()[len(prefix):])
+    return _normalize_whitespace(text)
 
 
 def extract_metadata_fields(html: str) -> dict:
@@ -134,7 +152,10 @@ def check_structure_drift(found_fields: dict):
     expected_count = len(EXPECTED_FIELDS)
     found_count = len(found_fields)
 
-    print(f"Champs attendus : {expected_count} | Champs trouvés : {found_count}")
+    print(
+        f"Champs métier attendus : {expected_count} | "
+        f"Champs métier trouvés : {found_count}"
+    )
 
     if found_count != expected_count:
         missing = [label for label, col in EXPECTED_FIELDS.items() if col not in found_fields]
@@ -159,25 +180,28 @@ def save_excel(data: dict, filename: str):
     path = OUTPUT_DIR / filename
     wb = Workbook()
     ws = wb.active
-    ws.title = "metadata"
+    ws.title = "Metadata"
     ws.append(list(data.keys()))
     ws.append([v.isoformat() if isinstance(v, datetime) else v for v in data.values()])
     wb.save(path)
     return path
 
 
-def save_postgres(data: dict, dsn: str):
-    """Upsert dans cpi.metadata (ON CONFLICT sur dataset_id)."""
+def save_postgres(data: dict, dsn: str, timestamp: datetime):
+    """Upsert dans cpi.metadata (ON CONFLICT sur dataset_id). `timestamp`
+    est fourni par l'appelant (pas recalculé ici) afin de garantir que
+    metadata.updated_at reste toujours <= logs.end_date : end_date doit
+    représenter la fin de tout le processus, donc être capturé APRÈS
+    cette écriture — voir main()."""
     import psycopg2
 
-    now = datetime.now(timezone.utc)
     row = dict(data)
     for field in DATE_FIELDS:
         if field in row and isinstance(row[field], str):
             parsed = parse_site_date(row[field])
             row[field] = parsed
-    row["created_at"] = now
-    row["updated_at"] = now
+    row["created_at"] = timestamp
+    row["updated_at"] = timestamp
 
     columns = list(row.keys())
     placeholders = ", ".join(["%s"] * len(columns))
@@ -206,7 +230,7 @@ def insert_log(dsn, request_mode, start_date, end_date, status,
                 collected_count, persisted_count, error_message=None):
     """Insère UN enregistrement final dans cpi.logs (pas d'état
     intermédiaire), pour tracer l'exécution du scraping — cohérent avec
-    la structure validée en BCMDG-235 (request_mode, status en
+    la structure de la table cpi.logs (request_mode, status en
     énumération, comptages égaux)."""
     import psycopg2
     conn = psycopg2.connect(dsn)
@@ -250,13 +274,25 @@ def main():
     fields = extract_metadata_fields(html)
 
     ok = check_structure_drift(fields)
-    if not ok:
-        print("⚠️  Poursuite malgré la dérive détectée (champs manquants laissés vides).", file=sys.stderr)
 
-    json_path = save_json(fields, "cpi_metadata.json")
+    
+    file_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    json_path = save_json(fields, f"imf_cpi_metadata_{file_ts}.json")
     print(f"JSON : {json_path}")
-    excel_path = save_excel(fields, "cpi_metadata.xlsx")
+    excel_path = save_excel(fields, f"imf_cpi_metadata_{file_ts}.xlsx")
     print(f"Excel : {excel_path}")
+
+    if not ok:
+        
+        print("Erreur : dérive de structure détectée. Insertion annulée.", file=sys.stderr)
+        if not args.no_db and args.dsn:
+            new_log_id = insert_log(
+                args.dsn, "Web Scraping", start_date, datetime.now(timezone.utc),
+                "FAILED", len(fields), 0,
+                "Dérive de structure détectée : champs manquants (voir Champs métier attendus/Champs métier trouvés ci-dessus)",
+            )
+            print(f"Résumé : id={new_log_id} (cpi.logs) | {len(fields)}/{len(EXPECTED_FIELDS)} champ(s) trouvé(s) | status=FAILED")
+        sys.exit(1)
 
     if args.no_db:
         print(f"Résumé : {len(fields)}/{len(EXPECTED_FIELDS)} champ(s) collecté(s) | status=SUCCESS (--no-db, rien en base)")
@@ -266,13 +302,15 @@ def main():
         print("Erreur : --dsn requis (ou utiliser --no-db)", file=sys.stderr)
         sys.exit(1)
 
-    end_date = datetime.now(timezone.utc)
     nb_champs = len(fields)
 
     try:
-        save_postgres(fields, args.dsn)
+        
+        write_timestamp = datetime.now(timezone.utc)
+        save_postgres(fields, args.dsn, timestamp=write_timestamp)
         print("✅ Écrit dans cpi.metadata (upsert sur dataset_id).")
         status = "SUCCESS"
+        end_date = datetime.now(timezone.utc)
         new_log_id = insert_log(args.dsn, "Web Scraping", start_date, end_date, status, nb_champs, nb_champs)
     except Exception as e:
         status = "FAILED"

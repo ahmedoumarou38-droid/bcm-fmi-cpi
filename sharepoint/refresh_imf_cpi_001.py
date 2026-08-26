@@ -1,6 +1,18 @@
 
 import argparse
+import sys as _sys_early
+
+try:
+    _sys_early.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys_early.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import sys
+import shutil
+import time
+import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,6 +150,13 @@ def rename_rows(rows, column_map):
 
 
 def write_sheet(ws, rows, headers=None):
+    """Écrit une feuille en mode streaming (write-only), compatible avec
+    de gros volumes sans exploser la mémoire. Pas de largeur de colonne
+    auto-calculée ni de style par cellule au-delà de l'en-tête (limitation
+    du mode write-only d'openpyxl) — on garde des largeurs fixes
+    raisonnables à la place."""
+    from openpyxl.cell import WriteOnlyCell
+
     if not rows:
         ws.append(["Aucune donnée disponible"])
         return
@@ -145,52 +164,65 @@ def write_sheet(ws, rows, headers=None):
     if headers is None:
         headers = list(rows[0].keys())
 
-    ws.append(headers)
-    for col_idx in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
+    header_cells = []
+    for h in headers:
+        c = WriteOnlyCell(ws, value=h)
+        c.fill = HEADER_FILL
+        c.font = HEADER_FONT
+        header_cells.append(c)
+    ws.append(header_cells)
 
     for row in rows:
         ws.append([row.get(h) for h in headers])
 
     for col_idx, header in enumerate(headers, start=1):
-        max_len = max(
-            [len(str(header))] + [len(str(row.get(header, ""))) for row in rows if row.get(header) is not None]
-        )
-        ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 2, 60)
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(str(header)) + 2, 12), 40)
 
     ws.freeze_panes = "A2"
 
 
 def write_fields_sheet(ws, data_headers):
-    ws.append(["Fields"])
-    ws.cell(row=1, column=1).fill = HEADER_FILL
-    ws.cell(row=1, column=1).font = HEADER_FONT
+    from openpyxl.cell import WriteOnlyCell
+
+    header_cell = WriteOnlyCell(ws, value="Fields")
+    header_cell.fill = HEADER_FILL
+    header_cell.font = HEADER_FONT
+    ws.append([header_cell])
     for header in data_headers:
         ws.append([header])
     ws.column_dimensions["A"].width = 40
 
 
 def build_workbook(metadata_rows, data_rows):
-    wb = Workbook()
+   
+    wb = Workbook(write_only=True)
 
+    ws_meta = wb.create_sheet("Metadata")
     metadata_headers = list(METADATA_COLUMN_MAP.values())
     metadata_renamed = rename_rows(metadata_rows, METADATA_COLUMN_MAP)
-    ws_meta = wb.active
-    ws_meta.title = "Metadata"
     write_sheet(ws_meta, metadata_renamed, headers=metadata_headers)
 
     data_headers = list(DATA_COLUMN_MAP.values())
-    data_renamed = rename_rows(data_rows, DATA_COLUMN_MAP)
-    ws_data = wb.create_sheet("Data")
-    write_sheet(ws_data, data_renamed, headers=data_headers)
 
     ws_fields = wb.create_sheet("Fields")
     write_fields_sheet(ws_fields, data_headers)
-    wb.move_sheet("Fields", offset=-1)
+
+    ws_data = wb.create_sheet("Data")
+    data_renamed = rename_rows(data_rows, DATA_COLUMN_MAP)
+    write_sheet(ws_data, data_renamed, headers=data_headers)
 
     return wb
+
+
+def sha256_file(path: Path) -> str:
+    """Hash SHA-256 du contenu d'un fichier — comparaison fiable,
+    indépendante de toute date de modification (qui peut être altérée par
+    copy2() ou par OneDrive lui-même)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def refresh_sharepoint_file(dsn: str, output_path: Path, coicop_filter):
@@ -204,7 +236,7 @@ def refresh_sharepoint_file(dsn: str, output_path: Path, coicop_filter):
         print("Erreur : aucun run réussi trouvé dans cpi.logs (request_mode='API').", file=sys.stderr)
         sys.exit(1)
     logs_id, end_date, nb_persistes = latest_run
-    print(f"  Dernier run : logs_id={logs_id} (terminé le {end_date}, {nb_persistes} ligne(s))")
+    print(f"  Dernier run : id={logs_id} (cpi.logs, terminé le {end_date}, {nb_persistes} ligne(s))")
 
     if coicop_filter:
         print(f"⚠️  Filtre temporaire actif : coicop_1999 IN {coicop_filter} "
@@ -225,9 +257,78 @@ def refresh_sharepoint_file(dsn: str, output_path: Path, coicop_filter):
 
     wb = build_workbook(metadata_rows, data_rows)
 
+   
+    
+    local_tmp_dir = Path(__file__).parent / "output"
+    local_tmp_dir.mkdir(parents=True, exist_ok=True)
+    local_tmp_path = local_tmp_dir / output_path.name
+
+    wb.save(local_tmp_path)
+    print(f"Fichier généré localement (hors OneDrive) : {local_tmp_path}")
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(output_path)
-    print(f"Fichier régénéré : {output_path}")
+
+    
+    max_attempts = 5
+    wait_seconds = 20
+    expected_hash = sha256_file(local_tmp_path)
+    expected_size = local_tmp_path.stat().st_size
+    destination_tmp = output_path.with_name(output_path.name + ".tmp")
+
+    copy_confirmed = False
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if destination_tmp.exists():
+                destination_tmp.unlink()
+
+            shutil.copyfile(local_tmp_path, destination_tmp)
+
+            tmp_hash = sha256_file(destination_tmp)
+            if tmp_hash != expected_hash:
+                raise RuntimeError(
+                    "Le hash du fichier temporaire ne correspond pas au fichier généré."
+                )
+
+            os.replace(destination_tmp, output_path)
+            print(f"Fichier remplacé (atomique) : {output_path}")
+
+            time.sleep(wait_seconds)
+
+            if not output_path.exists():
+                raise FileNotFoundError(f"Le fichier final est absent : {output_path}")
+
+            actual_hash = sha256_file(output_path)
+            actual_size = output_path.stat().st_size
+            if actual_hash == expected_hash and actual_size == expected_size:
+                mtime = datetime.fromtimestamp(output_path.stat().st_mtime, tz=timezone.utc)
+                print(f"  Date de modification : {mtime.isoformat()}")
+                print(f"  Taille : {actual_size / 1024:.0f} Ko")
+                print(f"✅ Vérification réussie (hash + taille) après {wait_seconds}s "
+                      f"(tentative {attempt}/{max_attempts})")
+                copy_confirmed = True
+                break
+
+            print(f"⚠️  Tentative {attempt}/{max_attempts} : le fichier a été modifié "
+                  f"de façon inattendue après le remplacement (probable resynchronisation "
+                  f"OneDrive, ou incident serveur SharePoint transitoire). "
+                  f"Nouvel essai...", file=sys.stderr)
+
+        except PermissionError as e:
+            print(f"⚠️  Fichier verrouillé (sans doute ouvert dans Excel) : {e}",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️  Tentative {attempt}/{max_attempts} échouée : {e}", file=sys.stderr)
+
+        time.sleep(wait_seconds)
+
+    if not copy_confirmed:
+        print(f"❌ ALERTE : après {max_attempts} tentatives, le fichier ne conserve "
+              f"toujours pas notre écriture. Vérification manuelle nécessaire sur : "
+              f"{output_path}", file=sys.stderr)
+        raise RuntimeError(
+            "Échec : le fichier ne conserve pas durablement notre écriture "
+            "après plusieurs tentatives."
+        )
 
     return len(metadata_rows), len(data_rows)
 
@@ -264,7 +365,9 @@ def main():
     except SystemExit:
         raise
     except Exception as e:
-        print(f"Erreur : {e}", file=sys.stderr)
+        import traceback
+        print(f"Erreur : [{type(e).__name__}] {e!r}", file=sys.stderr)
+        traceback.print_exc()
         sys.exit(1)
 
     duration = (datetime.now(timezone.utc) - start).total_seconds()
