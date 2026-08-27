@@ -44,6 +44,7 @@ EXPECTED_FIELDS = {
     "Suggested Citation": "suggested_citation",
 }
 
+
 DATE_FIELDS = {"publication_date", "update_date"}
 COMBINED_LABEL_VALUE_FIELDS = {"Dataset name", "ID", "Agency", "Version"}
 
@@ -117,21 +118,31 @@ def parse_combined_label_value(text: str, label: str) -> str:
 
 
 def extract_metadata_fields(html: str) -> dict:
+    """Extrait les champs, puis reconstruit le dictionnaire final dans
+    l'ordre EXACT d'EXPECTED_FIELDS — indépendamment de l'ordre dans
+    lequel chaque champ a été trouvé sur la page (champs combinés,
+    frequency, puis le reste, chacun dans une boucle séparée). Sans
+    cette reconstruction finale, l'ordre d'INSERTION dans le dict Python
+    suit l'ordre d'EXÉCUTION du code, pas l'ordre déclaré dans
+    EXPECTED_FIELDS — confirmé par un JSON généré le 26/08/2026 où
+    `frequency` apparaissait après `version` au lieu d'être entre
+    `dataset_id` et `agency`, malgré un EXPECTED_FIELDS correctement
+    ordonné."""
     soup = BeautifulSoup(html, "html.parser")
-    result = {}
+    raw_values = {}
 
     for label, column in EXPECTED_FIELDS.items():
         if label in COMBINED_LABEL_VALUE_FIELDS:
             node = soup.find(string=lambda s: s and s.strip().startswith(f"{label}:"))
             if node:
-                result[column] = parse_combined_label_value(str(node), label)
+                raw_values[column] = parse_combined_label_value(str(node), label)
 
     freq_label = soup.find("div", title="Frequency")
     if freq_label:
         freq_container = freq_label.find_next_sibling()
         freq_value = extract_leaf_paragraphs(freq_container)
         if freq_value:
-            result["frequency"] = freq_value
+            raw_values["frequency"] = freq_value
 
     for label, column in EXPECTED_FIELDS.items():
         if label in COMBINED_LABEL_VALUE_FIELDS or column == "frequency":
@@ -143,7 +154,13 @@ def extract_metadata_fields(html: str) -> dict:
         container = extract_value_container(h4)
         value = extract_leaf_paragraphs(container)
         if value:
-            result[column] = value
+            raw_values[column] = value
+
+   
+    result = {}
+    for label, column in EXPECTED_FIELDS.items():
+        if column in raw_values:
+            result[column] = raw_values[column]
 
     return result
 
@@ -275,7 +292,8 @@ def main():
 
     ok = check_structure_drift(fields)
 
-    
+    # Un seul timestamp de génération pour les 2 fichiers, format
+    # imf_cpi_metadata_YYYYMMDDTHHMMSS (heure UTC de génération)
     file_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     json_path = save_json(fields, f"imf_cpi_metadata_{file_ts}.json")
     print(f"JSON : {json_path}")
@@ -283,7 +301,7 @@ def main():
     print(f"Excel : {excel_path}")
 
     if not ok:
-        
+       
         print("Erreur : dérive de structure détectée. Insertion annulée.", file=sys.stderr)
         if not args.no_db and args.dsn:
             new_log_id = insert_log(
@@ -305,7 +323,7 @@ def main():
     nb_champs = len(fields)
 
     try:
-        
+       
         write_timestamp = datetime.now(timezone.utc)
         save_postgres(fields, args.dsn, timestamp=write_timestamp)
         print("✅ Écrit dans cpi.metadata (upsert sur dataset_id).")
