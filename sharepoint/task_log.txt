@@ -7,7 +7,7 @@ Lecture de cpi.data pour ce run...
   202685 ligne(s) data.
 Fichier généré localement (hors OneDrive) : C:\Users\pc\OneDrive - BCM\Bureau\Data Gouvernance\bcm-fmi-cpi\sharepoint\output\IMF - Consumer Price Index (CPI).xlsx
 Fichier remplacé (atomique) : C:\Users\pc\OneDrive - BCM\Monographie des visuels\Données publiques\IMF\IMF - Consumer Price Index (CPI).xlsx
-  Date de modification : 2026-08-26T13:54:22.390280+00:00
-  Taille : 6288 Ko
+  Date de modification : 2026-08-27T11:05:37.135367+00:00
+  Taille : 6290 Ko
 ✅ Vérification réussie (hash + taille) après 20s (tentative 1/5)
-Résumé : metadata=1 ligne(s) | data=202685 ligne(s) | durée=113.4s | statut=SUCCESS
+Résumé : metadata=1 ligne(s) | data=202685 ligne(s) | durée=126.9s | statut=SUCCESS
